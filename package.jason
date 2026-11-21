@@ -1,3 +1,1 @@
-SHELLY_DEVICE_ID="ec6260914a80" \
-SHELLY_AUTH_KEY="your_new_rotated_auth_key" \
-node server.js
+

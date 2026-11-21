@@ -1,0 +1,206 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Newfab Light Control</title>
+  <style>
+    body {
+      font-family: sans-serif;
+      padding: 24px;
+      max-width: 480px;
+    }
+    .status-row {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      margin: 16px 0 20px;
+      font-size: 16px;
+    }
+    .badge {
+      padding: 4px 10px;
+      border-radius: 6px;
+      font-weight: bold;
+      background: #e5e7eb;
+      color: #111827;
+    }
+    .badge.on {
+      background: #dcfce7;
+      color: #166534;
+    }
+    .badge.off {
+      background: #fee2e2;
+      color: #991b1b;
+    }
+    .controls {
+      display: flex;
+      gap: 12px;
+      flex-wrap: wrap;
+    }
+    button {
+      padding: 14px 20px;
+      font-size: 15px;
+      cursor: pointer;
+    }
+    button:disabled {
+      opacity: 0.55;
+      cursor: not-allowed;
+    }
+    .secondary {
+      padding: 8px 12px;
+      font-size: 13px;
+    }
+    #message {
+      margin-top: 14px;
+      font-size: 14px;
+      color: #4b5563;
+      min-height: 20px;
+      word-break: break-word;
+    }
+  </style>
+</head>
+<body>
+  <h2>Newfab Lighting</h2>
+
+  <div class="status-row">
+    <span>Laser-Lights (Channel 0):</span>
+    <span id="status-badge" class="badge">UNKNOWN</span>
+    <button type="button" id="btn-refresh" class="secondary" onclick="refreshStatus()">Refresh</button>
+  </div>
+
+  <div class="controls">
+    <button type="button" id="btn-on" onclick="setRelay('on')">Turn Laser-Lights ON</button>
+    <button type="button" id="btn-off" onclick="setRelay('off')">Turn Laser-Lights OFF</button>
+  </div>
+
+  <div id="message"></div>
+
+  <script>
+    const SERVER = "https://shelly-170-eu.shelly.cloud";
+    const DEVICE_ID = "ec6260914a80";
+    const AUTH_KEY = "MmY2ZmYzdWlkC504DAA488EF28C208632B828FF232A26F81A7D2494C807E42D2B9426F166DA78DDD2C94D7BC2794";
+    const CHANNEL = "0";
+    const TIMEOUT_MS = 8000;
+
+    const badgeEl = document.getElementById("status-badge");
+    const msgEl = document.getElementById("message");
+    const btnRefresh = document.getElementById("btn-refresh");
+    const btnOn = document.getElementById("btn-on");
+    const btnOff = document.getElementById("btn-off");
+
+    let requestSeq = 0;
+    let confirmTimer = null;
+
+    function renderState(isOn) {
+      if (typeof isOn !== "boolean") {
+        badgeEl.textContent = "UNKNOWN";
+        badgeEl.className = "badge";
+        return;
+      }
+      badgeEl.textContent = isOn ? "ON" : "OFF";
+      badgeEl.className = isOn ? "badge on" : "badge off";
+    }
+
+    function setBusy(busy) {
+      btnRefresh.disabled = busy;
+      btnOn.disabled = busy;
+      btnOff.disabled = busy;
+    }
+
+    function extractChannelState(statusJson, channel) {
+      const ds = statusJson?.data?.device_status;
+      if (!ds) return undefined;
+
+      const switchKey = `switch:${channel}`;
+      if (ds[switchKey] && typeof ds[switchKey].output === "boolean") {
+        return ds[switchKey].output;
+      }
+      if (Array.isArray(ds.relays) && ds.relays[Number(channel)] && typeof ds.relays[Number(channel)].ison === "boolean") {
+        return ds.relays[Number(channel)].ison;
+      }
+      return undefined;
+    }
+
+    async function postForm(path, paramsObj) {
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), TIMEOUT_MS);
+      try {
+        const res = await fetch(`${SERVER}${path}`, {
+          method: "POST",
+          body: new URLSearchParams(paramsObj),
+          signal: controller.signal
+        });
+        const data = await res.json();
+        if (!res.ok || data.isok === false) {
+          throw new Error(data.errors ? JSON.stringify(data.errors) : `HTTP ${res.status}`);
+        }
+        return data;
+      } catch (err) {
+        if (err.name === "AbortError") {
+          throw new Error("Request timed out");
+        }
+        throw err;
+      } finally {
+        clearTimeout(timeoutId);
+      }
+    }
+
+    async function refreshStatus({ silent = false } = {}) {
+      const seq = ++requestSeq;
+      if (!silent) {
+        setBusy(true);
+        msgEl.textContent = "Checking status...";
+      }
+      try {
+        const data = await postForm("/device/status", {
+          id: DEVICE_ID,
+          auth_key: AUTH_KEY
+        });
+        if (seq !== requestSeq) return;
+
+        const isOn = extractChannelState(data, CHANNEL);
+        renderState(isOn);
+        msgEl.textContent = isOn === undefined
+          ? "Status fetched, but relay state field was not found."
+          : `Updated at ${new Date().toLocaleTimeString()}`;
+      } catch (err) {
+        if (seq !== requestSeq) return;
+        msgEl.textContent = `Status error: ${err.message}`;
+      } finally {
+        if (!silent && seq === requestSeq) {
+          setBusy(false);
+        }
+      }
+    }
+
+    async function setRelay(turn) {
+      clearTimeout(confirmTimer);
+      const seq = ++requestSeq;
+      setBusy(true);
+      msgEl.textContent = `Sending "${turn.toUpperCase()}"...`;
+      try {
+        await postForm("/device/relay/control", {
+          id: DEVICE_ID,
+          auth_key: AUTH_KEY,
+          channel: CHANNEL,
+          turn
+        });
+        if (seq !== requestSeq) return;
+
+        renderState(turn === "on");
+        msgEl.textContent = `Command "${turn.toUpperCase()}" sent. Confirming...`;
+        confirmTimer = setTimeout(() => refreshStatus({ silent: true }), 800);
+      } catch (err) {
+        if (seq !== requestSeq) return;
+        msgEl.textContent = `Control error: ${err.message}`;
+      } finally {
+        if (seq === requestSeq) {
+          setBusy(false);
+        }
+      }
+    }
+
+    refreshStatus();
+  </script>
+</body>
+</html>
